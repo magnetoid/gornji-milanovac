@@ -1,0 +1,104 @@
+name: Deploy to Server
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  SERVER_IP: 65.21.238.89
+  SERVER_PATH: /var/www/vhosts/gornji-milanovac.com/httpdocs/wp-content
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy Theme and Plugin
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.SERVER_IP }} >> ~/.ssh/known_hosts
+
+      - name: Deploy Theme
+        run: |
+          rsync -avz --delete \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='node_modules' \
+            --exclude='.DS_Store' \
+            wp-theme/astra-child/ \
+            root@${{ env.SERVER_IP }}:${{ env.SERVER_PATH }}/themes/astra-child/
+
+      - name: Deploy Plugin
+        run: |
+          rsync -avz --delete \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='node_modules' \
+            --exclude='.DS_Store' \
+            wp-plugins/gm-portal/ \
+            root@${{ env.SERVER_IP }}:${{ env.SERVER_PATH }}/plugins/gm-portal/
+
+      - name: Set file permissions
+        run: |
+          ssh root@${{ env.SERVER_IP }} << 'EOF'
+            chown -R www-data:www-data ${{ env.SERVER_PATH }}/themes/astra-child/
+            chown -R www-data:www-data ${{ env.SERVER_PATH }}/plugins/gm-portal/
+            find ${{ env.SERVER_PATH }}/themes/astra-child/ -type d -exec chmod 755 {} \;
+            find ${{ env.SERVER_PATH }}/themes/astra-child/ -type f -exec chmod 644 {} \;
+            find ${{ env.SERVER_PATH }}/plugins/gm-portal/ -type d -exec chmod 755 {} \;
+            find ${{ env.SERVER_PATH }}/plugins/gm-portal/ -type f -exec chmod 644 {} \;
+          EOF
+
+      - name: Flush cache (optional)
+        continue-on-error: true
+        run: |
+          ssh root@${{ env.SERVER_IP }} << 'EOF'
+            # Clear WP Rocket cache if installed
+            if [ -d "${{ env.SERVER_PATH }}/cache/wp-rocket" ]; then
+              rm -rf ${{ env.SERVER_PATH }}/cache/wp-rocket/*
+            fi
+            # Clear opcache
+            if command -v php &> /dev/null; then
+              php -r "if(function_exists('opcache_reset')) { opcache_reset(); echo 'OPcache cleared'; }"
+            fi
+          EOF
+
+      - name: Deployment notification
+        run: |
+          echo "✅ Deployment completed successfully!"
+          echo "Theme deployed to: ${{ env.SERVER_PATH }}/themes/astra-child/"
+          echo "Plugin deployed to: ${{ env.SERVER_PATH }}/plugins/gm-portal/"
+
+  verify:
+    runs-on: ubuntu-latest
+    name: Verify Deployment
+    needs: deploy
+
+    steps:
+      - name: Check site is accessible
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" https://gornji-milanovac.com)
+          if [ "$response" = "200" ]; then
+            echo "✅ Site is accessible (HTTP $response)"
+          else
+            echo "⚠️ Site returned HTTP $response"
+          fi
+
+      - name: Check API endpoint
+        continue-on-error: true
+        run: |
+          response=$(curl -s https://gornji-milanovac.com/wp-json/gm/v1/stats)
+          if echo "$response" | grep -q "success"; then
+            echo "✅ API endpoint is working"
+            echo "$response" | jq .
+          else
+            echo "⚠️ API endpoint check failed"
+          fi
